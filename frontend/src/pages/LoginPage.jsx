@@ -111,14 +111,6 @@ export default function LoginPage() {
             </Button>
           </form>
           
-          <div className="mt-6 p-4 bg-slate-50 rounded-lg">
-            <p className="text-sm text-slate-600 font-medium mb-2">Demo Credentials:</p>
-            <div className="space-y-1 text-sm text-slate-500">
-              <p><span className="font-medium">Admin:</span> admin@school.com / admin123</p>
-              <p><span className="font-medium">Teacher:</span> teacher1@school.lk / teacher123</p>
-              <p><span className="font-medium">Student:</span> student1@school.lk / student123</p>
-            </div>
-          </div>
         </CardContent>
       </Card>
     </div>

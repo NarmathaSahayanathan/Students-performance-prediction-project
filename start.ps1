@@ -98,11 +98,33 @@ $frontendCmd = "Set-Location '$FrontendDir'; npm start"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
 Write-Ok "Frontend window launched."
 
-# ── 7. Open browser ─────────────────────────────────────────
-Write-Step "Opening browser in 8 seconds..."
-Start-Sleep -Seconds 8
-Start-Process "http://localhost:3000"
-Write-Ok "Browser opened."
+# ── 7. Wait for frontend then open browser ──────────────────
+Write-Step "Waiting for frontend to be ready on port 3000..."
+$maxWait = 120
+$waited  = 0
+$ready   = $false
+while ($waited -lt $maxWait) {
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("localhost", 3000)
+        $tcp.Close()
+        $ready = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 3
+        $waited += 3
+        Write-Host "    Still waiting... ($waited/$maxWait s)" -ForegroundColor DarkGray
+    }
+}
+
+if ($ready) {
+    Write-Ok "Frontend is ready!"
+    Start-Sleep -Seconds 1
+    cmd /c "start http://localhost:3000"
+    Write-Ok "Browser opened."
+} else {
+    Write-Warn "Frontend took too long to start. Open http://localhost:3000 manually."
+}
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
