@@ -332,9 +332,22 @@ def init_database():
                 UNIQUE KEY unique_student_note (student_id, subject, term)
             )
         """)
-        
+
+        # Add submission and download-tracking columns to student_notes if not present
+        try:
+            cursor.execute("ALTER TABLE student_notes ADD COLUMN submission_file_path VARCHAR(500) DEFAULT NULL")
+            cursor.execute("ALTER TABLE student_notes ADD COLUMN submission_file_name VARCHAR(255) DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass  # Columns already exist
+        try:
+            cursor.execute("ALTER TABLE student_notes ADD COLUMN downloaded_at TIMESTAMP NULL DEFAULT NULL")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
         conn.commit()
-        
+
         # Check if admin exists
         cursor.execute("SELECT id FROM users WHERE email = 'admin@school.com'")
         if not cursor.fetchone():
@@ -1990,12 +2003,15 @@ async def get_students_with_performance(
         
         # Get students with their marks for the specified term and subject
         cursor.execute("""
-            SELECT 
+            SELECT
                 s.id, s.index_no, s.first_name, s.last_name, s.phone,
                 CAST(ROUND(COALESCE(m.marks, 0)) AS SIGNED) as marks,
                 CAST(ROUND(COALESCE(p.predicted_term3, 0)) AS SIGNED) as predicted,
+                sn.id as note_id,
                 sn.note,
-                sn.file_name as worksheet_file
+                sn.file_name as worksheet_file,
+                sn.downloaded_at,
+                sn.submission_file_name
             FROM students s
             LEFT JOIN marks m ON s.id = m.student_id AND m.subject = %s AND m.term = %s
             LEFT JOIN predictions p ON s.id = p.student_id AND p.subject = %s
@@ -2007,11 +2023,78 @@ async def get_students_with_performance(
         students = cursor.fetchall()
         cursor.close()
         conn.close()
-        
+
+        for s in students:
+            if s.get('downloaded_at'):
+                s['downloaded_at'] = s['downloaded_at'].isoformat()
+
         return {"students": students}
     except Exception as e:
         logging.error(f"Get students performance error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get students")
+
+@api_router.post("/class-students/worksheet")
+async def upload_common_worksheet(
+    grade: str = Form(...),
+    section: str = Form(...),
+    term: str = Form(...),
+    subject: str = Form(...),
+    file: UploadFile = File(...),
+    token_data: dict = Depends(verify_token)
+):
+    """Upload one worksheet file for all students in a class"""
+    if token_data['role'] != 'teacher':
+        raise HTTPException(status_code=403, detail="Only teachers can upload worksheets")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+        term_int = int(term)
+
+        cursor.execute(
+            "SELECT id FROM students WHERE grade = %s AND section = %s ORDER BY index_no",
+            (grade, section)
+        )
+        students = cursor.fetchall()
+
+        if not students:
+            raise HTTPException(status_code=404, detail="No students found for this class")
+
+        # Save the file once, shared across all students
+        upload_dir = "/app/uploads/student_worksheets"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        file_name = file.filename
+        safe_grade = grade.replace(' ', '_')
+        file_path = f"{upload_dir}/common_{safe_grade}_{section}_{term}_{subject}_{file_name}"
+
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        for student in students:
+            cursor.execute("""
+                INSERT INTO student_notes (student_id, teacher_id, subject, term, note, file_path, file_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    file_path = VALUES(file_path),
+                    file_name = VALUES(file_name),
+                    updated_at = CURRENT_TIMESTAMP
+            """, (student['id'], token_data['sub'], subject, term_int, "", file_path, file_name))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {"message": f"Worksheet uploaded for {len(students)} students", "count": len(students), "file_name": file_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Common worksheet upload error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload worksheet")
 
 # Student Notes API
 class StudentNoteCreate(BaseModel):
@@ -2144,6 +2227,183 @@ async def save_bulk_notes(
     except Exception as e:
         logging.error(f"Save bulk notes error: {e}")
         raise HTTPException(status_code=500, detail="Failed to save notes")
+
+# Student Worksheet Download/Submit APIs
+@api_router.get("/student/worksheets")
+async def get_student_worksheets(token_data: dict = Depends(verify_token)):
+    """Get all worksheets assigned to the logged-in student by teachers"""
+    if token_data['role'] != 'student':
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT id FROM students WHERE user_id = %s
+        """, (token_data['sub'],))
+        student = cursor.fetchone()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        cursor.execute("""
+            SELECT sn.id, sn.subject, sn.term, sn.note, sn.file_name, sn.file_path,
+                   sn.submission_file_name, sn.updated_at
+            FROM student_notes sn
+            WHERE sn.student_id = %s AND sn.file_path IS NOT NULL
+            ORDER BY sn.term, sn.subject
+        """, (student['id'],))
+        worksheets = cursor.fetchall()
+
+        for w in worksheets:
+            if w.get('updated_at'):
+                w['updated_at'] = w['updated_at'].isoformat()
+
+        cursor.close()
+        conn.close()
+        return {"worksheets": worksheets}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Get student worksheets error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get worksheets")
+
+
+@api_router.get("/student/worksheets/{note_id}/download")
+async def download_student_worksheet(note_id: int, token_data: dict = Depends(verify_token)):
+    """Download a worksheet file assigned to the student"""
+    if token_data['role'] != 'student':
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT id FROM students WHERE user_id = %s", (token_data['sub'],))
+        student = cursor.fetchone()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        cursor.execute("""
+            SELECT file_path, file_name FROM student_notes
+            WHERE id = %s AND student_id = %s AND file_path IS NOT NULL
+        """, (note_id, student['id']))
+        note = cursor.fetchone()
+
+        if not note:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Worksheet not found")
+
+        # Record that the student has downloaded the worksheet
+        cursor.execute(
+            "UPDATE student_notes SET downloaded_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (note_id,)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        from fastapi.responses import FileResponse
+        return FileResponse(note['file_path'], filename=note['file_name'], media_type='application/octet-stream')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Download student worksheet error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download worksheet")
+
+
+@api_router.post("/student/worksheets/{note_id}/submit")
+async def submit_student_worksheet(
+    note_id: int,
+    file: UploadFile = File(...),
+    token_data: dict = Depends(verify_token)
+):
+    """Upload a student's submission for a worksheet"""
+    if token_data['role'] != 'student':
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT id FROM students WHERE user_id = %s", (token_data['sub'],))
+        student = cursor.fetchone()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        cursor.execute("""
+            SELECT id FROM student_notes WHERE id = %s AND student_id = %s
+        """, (note_id, student['id']))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Worksheet not found")
+
+        upload_dir = "/app/uploads/student_submissions"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        file_name = file.filename
+        file_path = f"{upload_dir}/{student['id']}_{note_id}_{file_name}"
+
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        cursor.execute("""
+            UPDATE student_notes SET submission_file_path = %s, submission_file_name = %s
+            WHERE id = %s AND student_id = %s
+        """, (file_path, file_name, note_id, student['id']))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {"message": "Submission uploaded successfully", "file_name": file_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Submit student worksheet error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload submission")
+
+@api_router.get("/student-notes/{note_id}/submission/download")
+async def download_student_submission(note_id: int, token_data: dict = Depends(verify_token)):
+    """Teacher downloads a student's submitted worksheet"""
+    if token_data['role'] != 'teacher':
+        raise HTTPException(status_code=403, detail="Only teachers can access submissions")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT sn.submission_file_path, sn.submission_file_name
+            FROM student_notes sn
+            WHERE sn.id = %s AND sn.submission_file_path IS NOT NULL
+        """, (note_id,))
+        note = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not note:
+            raise HTTPException(status_code=404, detail="Submission not found")
+
+        from fastapi.responses import FileResponse
+        return FileResponse(note['submission_file_path'], filename=note['submission_file_name'], media_type='application/octet-stream')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Download submission error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download submission")
 
 # Worksheets API
 class WorksheetCreate(BaseModel):

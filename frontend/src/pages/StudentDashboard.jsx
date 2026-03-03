@@ -1,22 +1,24 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import { API, useAuth } from "../App";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Badge } from "../components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Button } from "../components/ui/button";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
-import { GraduationCap, TrendingUp, Calendar, AlertTriangle, LogOut, CheckCircle2, XCircle, Clock, Download } from "lucide-react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
+import { GraduationCap, TrendingUp, Calendar, LogOut, CheckCircle2, XCircle, Clock, Download, FileText, Upload, Check, Loader2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 export default function StudentDashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const { user, logout } = useAuth();
+  const [worksheets, setWorksheets] = useState([]);
+  const [submitting, setSubmitting] = useState(null);
+  const fileInputRefs = useRef({});
+  const { logout } = useAuth();
   const navigate = useNavigate();
 
-  useEffect(() => { fetchDashboard(); }, []);
+  useEffect(() => { fetchDashboard(); fetchWorksheets(); }, []);
 
   const fetchDashboard = async () => {
     try {
@@ -24,6 +26,42 @@ export default function StudentDashboard() {
       setData(response.data);
     } catch (error) { toast.error("Failed to load dashboard"); }
     finally { setLoading(false); }
+  };
+
+  const fetchWorksheets = async () => {
+    try {
+      const response = await axios.get(`${API}/student/worksheets`);
+      setWorksheets(response.data.worksheets || []);
+    } catch (error) { console.error("Failed to load worksheets"); }
+  };
+
+  const handleDownload = async (ws) => {
+    try {
+      const response = await axios.get(`${API}/student/worksheets/${ws.id}/download`, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', ws.file_name);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success("Downloaded");
+    } catch (error) { toast.error("Failed to download worksheet"); }
+  };
+
+  const handleSubmit = async (wsId, file) => {
+    if (!file) return;
+    setSubmitting(wsId);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      await axios.post(`${API}/student/worksheets/${wsId}/submit`, formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+      toast.success("Submission uploaded");
+      fetchWorksheets();
+    } catch (error) { toast.error("Failed to upload submission"); }
+    finally { setSubmitting(null); }
   };
 
   const handleLogout = () => { logout(); navigate("/login"); };
@@ -51,15 +89,11 @@ export default function StudentDashboard() {
     if (!marksBySubject[m.subject]) marksBySubject[m.subject] = {};
     marksBySubject[m.subject][m.term] = m.marks;
   });
-  const predBySubject = {};
-  data?.predictions?.forEach(p => { predBySubject[p.subject] = p; });
-  
   const chartData = Object.entries(marksBySubject).map(([subject, terms]) => ({
     subject,
     term1: terms[1] || 0,
     term2: terms[2] || 0,
     term3: terms[3] || 0,
-    predicted: predBySubject[subject]?.predicted_term3 || 0
   }));
 
   const attendance = data?.attendance || { present: 0, absent: 0, late: 0, total: 0 };
@@ -129,43 +163,98 @@ export default function StudentDashboard() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis dataKey="subject" tick={{ fill: '#64748b', fontSize: 12 }} />
                   <YAxis tick={{ fill: '#64748b', fontSize: 12 }} domain={[0, 100]} />
-                  <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e2e8f0', borderRadius: '8px' }} />
-                  <Bar dataKey="term1" name="Term 1" fill="#0ea5e9" radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="term2" name="Term 2" fill="#06b6d4" radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="term3" name="Term 3" fill="#14b8a6" radius={[2, 2, 0, 0]} />
+                  <Bar dataKey="term1" fill="#0ea5e9" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="term2" fill="#06b6d4" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="term3" fill="#14b8a6" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
+            </div>
+            <div className="flex justify-center gap-8 mt-4 pt-4 border-t border-slate-100">
+              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-sky-500"></div><span className="text-sm text-slate-600">Term 1</span></div>
+              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-cyan-500"></div><span className="text-sm text-slate-600">Term 2</span></div>
+              <div className="flex items-center gap-2"><div className="w-4 h-4 rounded bg-teal-500"></div><span className="text-sm text-slate-600">Term 3</span></div>
             </div>
           </CardContent>
         </Card>
 
         {/* Marks Table */}
         <Card className="border-0 shadow-sm">
-          <CardHeader><CardTitle className="text-lg">Detailed Marks & Predictions</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-lg">Detailed Marks</CardTitle></CardHeader>
           <CardContent className="p-0">
             <Table>
               <TableHeader><TableRow className="bg-slate-50">
-                <TableHead>Subject</TableHead><TableHead>Term 1</TableHead><TableHead>Term 2</TableHead><TableHead>Term 3</TableHead><TableHead>Predicted</TableHead><TableHead>Status</TableHead>
+                <TableHead>Subject</TableHead><TableHead>Term 1</TableHead><TableHead>Term 2</TableHead><TableHead>Term 3</TableHead>
               </TableRow></TableHeader>
               <TableBody>
                 {['Maths', 'Science', 'English', 'Tamil', 'ICT'].map(subject => {
                   const terms = marksBySubject[subject] || {};
-                  const pred = predBySubject[subject];
                   return (
                     <TableRow key={subject}>
                       <TableCell className="font-medium">{subject}</TableCell>
                       <TableCell>{terms[1] ?? '-'}</TableCell>
                       <TableCell>{terms[2] ?? '-'}</TableCell>
                       <TableCell>{terms[3] ?? '-'}</TableCell>
-                      <TableCell className="font-medium">{pred?.predicted_term3 ?? '-'}</TableCell>
-                      <TableCell>
-                        {pred?.is_at_risk ? <Badge className="at-risk-badge flex items-center gap-1 w-fit"><AlertTriangle className="w-3 h-3" />At Risk</Badge> : pred ? <Badge className="on-track-badge">On Track</Badge> : '-'}
-                      </TableCell>
                     </TableRow>
                   );
                 })}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+        {/* Worksheets */}
+        <Card className="border-0 shadow-sm">
+          <CardHeader><CardTitle className="text-lg flex items-center gap-2"><FileText className="w-5 h-5 text-sky-500" />My Worksheets</CardTitle></CardHeader>
+          <CardContent className="p-0">
+            {worksheets.length === 0 ? (
+              <div className="p-8 text-center text-slate-500">No worksheets assigned yet</div>
+            ) : (
+              <Table>
+                <TableHeader><TableRow className="bg-slate-50">
+                  <TableHead>Subject</TableHead>
+                  <TableHead>Term</TableHead>
+                  <TableHead>Note</TableHead>
+                  <TableHead>Worksheet</TableHead>
+                  <TableHead>Submit</TableHead>
+                  <TableHead>Submission</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {worksheets.map(ws => (
+                    <TableRow key={ws.id}>
+                      <TableCell className="font-medium">{ws.subject}</TableCell>
+                      <TableCell>Term {ws.term}</TableCell>
+                      <TableCell className="text-slate-500 text-sm">{ws.note || '-'}</TableCell>
+                      <TableCell>
+                        <Button variant="outline" size="sm" onClick={() => handleDownload(ws)}>
+                          <Download className="w-4 h-4 mr-1" />Download
+                        </Button>
+                      </TableCell>
+                      <TableCell>
+                        <div className="relative">
+                          <input
+                            ref={el => fileInputRefs.current[ws.id] = el}
+                            type="file"
+                            accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                            onChange={(e) => { if (e.target.files?.[0]) handleSubmit(ws.id, e.target.files[0]); }}
+                          />
+                          <Button variant="outline" size="sm" disabled={submitting === ws.id} className="pointer-events-none">
+                            {submitting === ws.id ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Upload className="w-4 h-4 mr-1" />}
+                            Upload
+                          </Button>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {ws.submission_file_name ? (
+                          <span className="flex items-center gap-1 text-green-600 text-sm">
+                            <Check className="w-4 h-4" />{ws.submission_file_name}
+                          </span>
+                        ) : <span className="text-slate-400 text-sm">Not submitted</span>}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
       </main>

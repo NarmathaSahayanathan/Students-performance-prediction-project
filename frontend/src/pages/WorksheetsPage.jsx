@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Upload, FileText, Loader2, Save, Users, TrendingUp, TrendingDown, Minus, Check, X } from "lucide-react";
+import { Upload, FileText, Loader2, Save, Users, TrendingUp, TrendingDown, Minus, Check, X, Download } from "lucide-react";
 
 const GRADES = ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7", "Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12", "Grade 13"];
 const SECTIONS = ["A", "B", "C", "D"];
@@ -26,7 +26,10 @@ export default function WorksheetsPage() {
   const [grade, setGrade] = useState("");
   const [section, setSection] = useState("");
   const [term, setTerm] = useState("1");
+  const [commonFile, setCommonFile] = useState(null);
+  const [uploadingCommon, setUploadingCommon] = useState(false);
   const fileInputRefs = useRef({});
+  const commonFileInputRef = useRef(null);
 
   useEffect(() => { 
     fetchTeacherInfo();
@@ -35,6 +38,8 @@ export default function WorksheetsPage() {
   useEffect(() => {
     if (grade && section && term) {
       fetchStudentsWithPerformance();
+      setCommonFile(null);
+      if (commonFileInputRef.current) commonFileInputRef.current.value = "";
     }
   }, [grade, section, term, teacherSubject]);
 
@@ -92,6 +97,29 @@ export default function WorksheetsPage() {
     const file = e.target.files?.[0];
     if (file) {
       setStudentFiles(prev => ({ ...prev, [studentId]: { file, name: file.name, uploaded: false } }));
+    }
+  };
+
+  const handleCommonUpload = async () => {
+    if (!commonFile || !grade || !section || !teacherSubject) return;
+    setUploadingCommon(true);
+    try {
+      const formData = new FormData();
+      formData.append("grade", grade);
+      formData.append("section", section);
+      formData.append("term", term);
+      formData.append("subject", teacherSubject);
+      formData.append("file", commonFile);
+      const res = await axios.post(`${API}/class-students/worksheet`, formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+      toast.success(`Worksheet uploaded for ${res.data.count} students`);
+      fetchStudentsWithPerformance();
+    } catch (error) {
+      toast.error("Failed to upload common worksheet");
+      console.error(error);
+    } finally {
+      setUploadingCommon(false);
     }
   };
 
@@ -185,6 +213,20 @@ export default function WorksheetsPage() {
     }
   };
 
+  const handleDownloadSubmission = async (student) => {
+    try {
+      const response = await axios.get(`${API}/student-notes/${student.note_id}/submission/download`, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', student.submission_file_name);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success("Submission downloaded");
+    } catch (error) { toast.error("Failed to download submission"); }
+  };
+
   const clearFile = (studentId) => {
     setStudentFiles(prev => {
       const updated = { ...prev };
@@ -266,6 +308,51 @@ export default function WorksheetsPage() {
           </CardContent>
         </Card>
 
+        {/* Common Worksheet Upload */}
+        {grade && section && (
+          <Card className="border-0 shadow-sm border-l-4 border-l-sky-400">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Upload className="w-4 h-4 text-sky-500" />
+                Upload Common Worksheet for All Students — {grade} {section}, Term {term}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-4 flex-wrap">
+                <div className="relative">
+                  <input
+                    ref={commonFileInputRef}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    onChange={(e) => setCommonFile(e.target.files?.[0] || null)}
+                  />
+                  <Button variant="outline" size="sm" className="pointer-events-none">
+                    <FileText className="w-4 h-4 mr-1" />
+                    {commonFile ? commonFile.name : "Choose File"}
+                  </Button>
+                </div>
+                {commonFile && (
+                  <Button
+                    size="sm"
+                    onClick={handleCommonUpload}
+                    disabled={uploadingCommon}
+                    className="bg-sky-500 hover:bg-sky-600"
+                  >
+                    {uploadingCommon
+                      ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />Uploading...</>
+                      : <><Upload className="w-4 h-4 mr-1" />Upload for All {students.length > 0 ? `(${students.length})` : ""} Students</>
+                    }
+                  </Button>
+                )}
+                {!commonFile && (
+                  <p className="text-sm text-slate-400">Select a file to assign the same worksheet to every student in this class</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Students List with Individual Worksheet Upload */}
         {grade && section && (
           <Card className="border-0 shadow-sm">
@@ -301,6 +388,8 @@ export default function WorksheetsPage() {
                         <TableHead className="w-24">Level</TableHead>
                         <TableHead className="w-64">Description / Notes</TableHead>
                         <TableHead className="w-56">Upload Worksheet</TableHead>
+                        <TableHead className="w-28 text-center">Downloaded</TableHead>
+                        <TableHead className="w-36">Submission</TableHead>
                         <TableHead className="w-24 text-center">Action</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -358,6 +447,25 @@ export default function WorksheetsPage() {
                                   </div>
                                 )}
                               </div>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {student.downloaded_at ? (
+                                <span className="flex items-center justify-center gap-1 text-green-600 text-xs">
+                                  <Check className="w-4 h-4" />Downloaded
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 text-xs">Not yet</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {student.submission_file_name ? (
+                                <Button variant="outline" size="sm" onClick={() => handleDownloadSubmission(student)} title={student.submission_file_name}>
+                                  <Download className="w-4 h-4 mr-1" />
+                                  <span className="truncate max-w-20">{student.submission_file_name}</span>
+                                </Button>
+                              ) : (
+                                <span className="text-slate-400 text-xs">No submission</span>
+                              )}
                             </TableCell>
                             <TableCell className="text-center">
                               <Button
